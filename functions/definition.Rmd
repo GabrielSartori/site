@@ -1,0 +1,14 @@
+<!-- sem código> -->
+
+```{r, echo = FALSE, message = FALSE, error = FALSE}
+require(knitr)
+
+opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  error = FALSE
+  )
+# https://statnmap.com/2017-11-13-enable-code-folding-in-bookdown-and-blogdown/ 
+
+```

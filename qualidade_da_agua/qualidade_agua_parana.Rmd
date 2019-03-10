@@ -1,0 +1,575 @@
+---
+title:  Que rios nós queremos?
+author: Gabriel
+date: '2019-02-01'
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    highlight: tango
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r, child = "../functions/definition.Rmd"}
+```
+
+# Pacotes 
+```{r}
+require(ggplot2)
+require(dplyr)
+require(sf)
+require(leaflet)
+require(RPostgreSQL)
+require(spdep)
+require(kableExtra)
+require(forcats)
+require(purrr)
+```
+
+# Funções 
+
+```{r}
+# Source functions
+source("../functions/stacked_bar.R")
+source("../functions/vline_stat_summary.R")
+```
+
+
+# Base de dados
+
+## Bacia Hidrográfica
+```{r}
+# Shapefile Bacia Hidrográfica
+bacia_zip <- unzip("../data_raw/Bacias_Hidrograficas_Parana.zip")
+file_output <- stringr::word("Bacias_Hidrograficas_Parana", 1)
+
+# Bacia
+bacia <- rgdal::readOGR(dsn = file_output,
+                        layer = "Bacias_Hidrograficas_Parana", 
+                        verbose = FALSE)
+
+proj4string(bacia) <- CRS("+proj=utm +zone=22 +south") 
+
+bacia <-
+  spTransform(bacia,  
+              CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+
+bacia$NOME <- as.character(bacia$NOME)
+Encoding(bacia$NOME) <- "latin1"
+
+bacia$NOME <- c("Cinzas", "Corpos d' Água", "Iguaçu", "Ilhas", "Itararé",
+                "Ivaí", "Litorânea", "Paraná 1", "Paraná 2", "Paraná 3",
+                "Paranapanema 1", "Paranapanema 2", "Paranapanema 3", 
+                "Paranapanema 4",  "Piquiri", "Pirapó", "Ribeira", "Tibagi")
+```
+
+## Qualidade da água
+
+```{r}
+# A base de dados da matéria, eu coloquei num sql local. Assim eu faço todas as query extraindo direto do banco. 
+# Vou disponibilizar o dataset csv (qualidade_agua), porém confira a mateŕia que insere dados no postgresql local por meio do R.
+# https://www.r-bloggers.com/using-postgresql-in-r-a-quick-how-to/
+
+```
+
+```{r}
+# Data 
+drv <- dbDriver("PostgreSQL")
+
+con <- dbConnect(drv, 
+                 dbname = "IQA",
+                 host = "localhost", 
+                 port = 5432,
+                 user = "postgres", 
+                 password = "bacia")
+```
+
+```{r}
+# Find columns names 
+nome <- dbGetQuery(con,"SELECT * FROM ndagua LIMIT 1;") %>% names()
+```
+
+
+```{r}
+# Período de coleta 
+range <- dbGetQuery(con, 
+  "SELECT MIN(ano), MAX(ano) FROM ndagua  WHERE origem = 'AguasParana'") 
+
+coleta <- dbGetQuery(con,"SELECT * FROM ndagua WHERE origem = 'AguasParana';") %>% nrow()
+
+monitoramento <- dbGetQuery(con,"
+  SELECT monit FROM ndagua WHERE origem = 'AguasParana'
+  GROUP BY 1;") %>% nrow()
+
+rio <- dbGetQuery(con,"
+  SELECT rio FROM ndagua WHERE origem = 'AguasParana'
+  GROUP BY 1;") %>% nrow()
+```
+
+# Análise de Dados 
+## Período de Coleta
+```{r, fig.width = 7, fig.height = 3}
+dbGetQuery(con, 
+  "SELECT ano, COUNT(*) FROM ndagua  WHERE origem = 'AguasParana'
+  GROUP BY 1
+  ORDER BY 1") %>%
+  ggplot(aes(ano, count)) +
+  geom_point() +
+  geom_line() +
+  scale_x_continuous(breaks = c(range$min, 1990, 2000, 2010, range$max)) +
+  theme_bw() +
+  labs(x = "Ano", y = "Coletas")
+```
+
+
+## Mapa das Estações de Monitoramento
+```{r}
+esp_estac <- dbGetQuery(con, 
+  "SELECT monit, COUNT(*), lat, long FROM ndagua WHERE origem = 'AguasParana'
+  GROUP BY monit, lat, long") %>% 
+  na.omit() %>% 
+  mutate(lat = as.numeric(lat), long = as.numeric(long)) %>% 
+  # id da estação de mmonitoramento
+  mutate(id = stringr::word(monit ,1)) %>% 
+  st_as_sf(., coords = c("long", "lat"), crs = 4326, agr = "identity") 
+
+
+# Popup 
+content <- paste(
+  "<b> Ponto de Monitoramento </b> :", esp_estac$id, "<br>",
+  "<b> Contagem </b> :", esp_estac$count
+)
+
+
+palet <- colorNumeric("Blues", esp_estac$count)
+
+# ADD shapefile Bacia
+leaflet(esp_estac) %>%
+  addProviderTiles(providers$Hydda.Full) %>% 
+  addPolygons(data = bacia, 
+              color = "black", 
+              fillColor = "gray",
+              weight = 1,
+              fillOpacity = 0.1,
+              label = ~NOME,
+              group = "Bacia Hidrográfica") %>% 
+  addCircleMarkers(fillColor = ~palet(count),
+                   color = "black", 
+                  popup = content,
+                    opacity = 1,
+                   fillOpacity = 1,
+                   radius = 5,
+                   weight = 1,
+                   stroke = TRUE, 
+                   group = "Estação Monitoramento") %>%
+  addLegend(pal = palet, value = ~count,
+            opacity = 1, title = "Coletas") %>% 
+  addLayersControl(overlayGroups = 
+                     c("Estação Monitoramento", "Bacia Hidrográfica"))
+
+```
+
+
+## Quantidade de Coletas por Bacia Hidrográfica
+```{r}
+dbGetQuery(con, 
+  "SELECT bacia, COUNT(*) AS p, COUNT(DISTINCT monit) AS m, COUNT(DISTINCT rio) AS r, COUNT(DISTINCT munic) AS mun
+  FROM ndagua WHERE origem = 'AguasParana'
+  GROUP BY 1
+  ORDER BY 2 DESC") %>% 
+  janitor:: adorn_totals() %>% 
+  plyr::rename(c(
+    "bacia" = "Bacia", 
+    "p" = "Coletas", 
+    "m" = "Monitoramento", 
+    "r" = "Rio", 
+    "mun" = "Município")) %>% 
+  kable(row.names  = NA, align = 'c', caption = "Abrangência das Coletas") %>%
+  kable_styling()
+```
+
+## Época do Ano
+  
+```{r}
+# Época do Ano
+bh_epoca <-
+  dbGetQuery(con, 
+    "SELECT bacia, epoca, COUNT(*) 
+    FROM ndagua WHERE origem = 'AguasParana'
+    GROUP BY 1,2
+    ORDER BY 1,2 DESC") %>% 
+  group_by(bacia) %>% 
+  mutate(perc = count/sum(count)) %>% 
+  filter(bacia != "Paranapanema 1") %>% 
+  droplevels() %>% 
+  ungroup() %>% 
+  tidyr::complete(bacia, tidyr::nesting(epoca)) %>% 
+  tidyr::replace_na(list(count = 0, perc = 0)) 
+
+
+```
+
+## Condição do Tempo
+
+```{r, fig.width = 8, fig.height = 7}
+ggplot(data  = bh_epoca, aes(x = epoca, y = perc, fill = epoca)) +
+  geom_bar(stat = "identity", colour = "black") +
+  facet_wrap(~bacia) +
+  theme_bw() +
+  geom_hline(
+      aes(yintercept = 0.25,  linetype = "0.25"), 
+    color = "red",
+    data = bh_epoca) +
+  scale_linetype_manual(name = "", values = "dashed", labels = "25%") + 
+  scale_fill_manual(
+    name = "Época", 
+    labels = c("Inverno", "Outono", "Primavera", "Verão"),
+    values = c("#b3cde3", "#f2f2f2", "#ffffcc", "#fed9a6")
+  ) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "", y = "% de Coletas", title = "Época do Ano") +
+  theme(
+    axis.text.x = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+
+```{r, fig.width = 8, fig.height = 7}
+# Condição do Tempo 
+bh_clima <-
+  dbGetQuery(con, 
+    "SELECT bacia, clima, COUNT(*) 
+    FROM ndagua WHERE origem = 'AguasParana'
+    GROUP BY 1,2
+    ORDER BY 1,2 DESC") %>% 
+  group_by(bacia) %>% 
+  tidyr::replace_na(list(clima = "Não Informado")) %>% 
+  mutate(perc = count/sum(count)) %>% 
+  filter(bacia != "Paranapanema 1") %>% 
+  droplevels() %>% 
+  ungroup() %>% 
+  tidyr::complete(bacia, tidyr::nesting(clima)) %>% 
+  tidyr::replace_na(list(count = 0, perc = 0)) %>% 
+  mutate(clima = as.factor(clima)) %>% 
+  mutate(clima = fct_recode(clima, Bom = "BOM", Nublado = "NUB", Chuvoso = "CHU")) %>% 
+  mutate(clima = fct_relevel(clima, "Bom", "Nublado", "Chuvoso", "Não Informado"))
+
+ggplot(data  = bh_clima, aes(x = clima, y = perc, fill = clima)) +
+  geom_bar(stat = "identity", colour = "black") +
+  facet_wrap(~bacia) +
+  theme_bw() +
+  geom_hline(
+      aes(yintercept = 0.33,  linetype = "0.33"), 
+    color = "black",
+    data = bh_clima) +
+  scale_linetype_manual(name = "", values = "dashed", labels = "33%") + 
+  scale_fill_manual(
+    name = "Época", 
+    labels = c("Bom", "Nublado", "Chuvoso", "Não Informado"),
+    values = c("#b3de69", "gray50", "#80b1d3", "white")
+  ) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "", y = "% de Coletas", title = "Condição do Tempo") +
+  theme(
+    axis.text.x = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+    )
+```
+
+## Enquadramento
+```{r tab_enquadramento}
+options(knitr.kable.NA = 'Não Informado')
+
+dbGetQuery(con, 
+  "SELECT class, COUNT(*) FROM ndagua  WHERE origem = 'AguasParana'
+  GROUP BY 1
+  ORDER BY 1") %>% 
+  # group_by(class) %>% 
+  mutate(perc = round(count/sum(count)* 100,2)) %>% 
+  plyr::rename(c(
+    "class" = "Classe",
+    "count" = "Qtde",
+    "perc" = "%")) %>% 
+  kable(row.names = NA, align = "c", format = "html") %>% kable_styling(position = "center")
+```
+
+
+```{r}
+
+variavel <- c(
+  "Oxigênio Dissolvido (OD)", 
+  "Coliformes Fecais (CF)", 
+  "Demanda Bioquímica de Oxigênio (DBO)",
+  "Sólidos Totais (ST)", 
+  "Coliforme Totais (CT)",
+  "PH")
+
+um <- c("mg/L", "NMP/100ml", "mg/L", "mg/L", "NMP/100ml", "")
+
+cl1 <- c(">6", "<200", "<3", "<500", "<1000", "[6 - 9] (Neutro)")
+cl2<- c(">5", "<400", "<5", "<500", "<5000", "[6 - 9] (Neutro)")
+cl3 <- c(">4", "<1000", "<10", "<500", "<20000", "[6 - 9] (Neutro)")
+
+options(knitr.table.format = 'html')
+# options(knitr.table.format = 'markdown')
+# amplitude <- c("\\inf")
+
+amplitude <- c("0-9.2", "\\(0 -\\inf \\)",  "\\(0 - \\inf \\)", 
+              "0 - \\(\\inf \\)", "0 - \\(\\inf\\)", "0 - 14")
+
+cbind(variavel, um, cl1, cl2, cl3, amplitude) %>% 
+  data.frame() %>% 
+  plyr::rename(c(
+    "variavel" = "Variável", 
+    "um" = "Unidade de Medida",
+    "cl1" = "Classe 1", 
+    "cl2" = "Classe 2",
+    "cl3" = "Classe 3")) %>% 
+  kable(align = 'c', row.names = NA, caption = "Limites Conama") %>% kable_styling()
+```
+
+## Atendimento as normas conama
+
+```{r}
+aggr_class_bacia <-
+  dbGetQuery(con,
+  "SELECT bacia, class, clst, clct, clph, clod, cldbo, clcf
+  FROM ndagua WHERE origem = 'AguasParana'") %>% 
+  na.omit() %>% 
+  filter(bacia != "Paranapanema 1") %>% 
+  tidyr::gather(grupo, resposta, clst:clcf) %>% 
+  group_by(bacia, class, grupo, resposta) %>% 
+  count() %>% 
+  group_by(bacia, class, grupo) %>% 
+  mutate(perc = n/sum(n)) %>% 
+  data.frame() %>% 
+  mutate(resposta =  as.factor(trimws(gsub("[[:digit:]]+", "", resposta)))) %>% 
+  mutate(resposta =  gsub(" da classe| ao limite da classe", "", resposta)) %>% 
+  mutate(resposta = forcats::fct_relevel(resposta, 
+    "Esperado", "Superior", "Limite Excedido",
+    "Ácida", "Neutro", "Alcalina"))  %>% 
+  mutate(resposta = fct_recode(resposta, Adequado = "Esperado")) %>% 
+  group_by(grupo) %>%
+  tidyr::nest()
+
+aggr_class_bacia$grupo <- 
+  aggr_class_bacia$grupo %>% 
+  gsub("cl", "", .)
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+id_od <- aggr_class_bacia$grupo %in% "od" %>% 
+  which()
+
+gridExtra::grid.arrange(
+  stacked_wrap(aggr_class_bacia$data[[id_od]], 1, FALSE),
+  stacked_wrap(aggr_class_bacia$data[[id_od]], 2, TRUE),
+  stacked_wrap(aggr_class_bacia$data[[id_od]], 3, FALSE),
+  ncol = 3
+)
+```
+
+
+
+```{r, fig.width = 10, fig.height = 6}
+id_cf <- aggr_class_bacia$grupo %in% "cf" %>% 
+  which()
+
+gridExtra::grid.arrange(
+  stacked_wrap(aggr_class_bacia$data[[id_cf]], 1, FALSE),
+  stacked_wrap(aggr_class_bacia$data[[id_cf]], 2, TRUE),
+  stacked_wrap(aggr_class_bacia$data[[id_cf]], 3, FALSE),
+  ncol = 3
+)
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+id_dbo <- aggr_class_bacia$grupo %in% "dbo" %>% 
+  which()
+
+gridExtra::grid.arrange(
+  stacked_wrap(aggr_class_bacia$data[[id_dbo]], 1, FALSE),
+  stacked_wrap(aggr_class_bacia$data[[id_dbo]], 2, TRUE),
+  stacked_wrap(aggr_class_bacia$data[[id_dbo]], 3, FALSE),
+  ncol = 3
+)
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+id_st <- aggr_class_bacia$grupo %in% "st" %>% 
+  which()
+
+gridExtra::grid.arrange(
+  stacked_wrap(aggr_class_bacia$data[[id_st]], 1, FALSE),
+  stacked_wrap(aggr_class_bacia$data[[id_st]], 2, TRUE),
+  stacked_wrap(aggr_class_bacia$data[[id_st]], 3, FALSE),
+  ncol = 3
+)
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+id_ct <- aggr_class_bacia$grupo %in% "ct" %>% 
+  which()
+
+gridExtra::grid.arrange(
+  stacked_wrap(aggr_class_bacia$data[[id_ct]], 1, FALSE),
+  stacked_wrap(aggr_class_bacia$data[[id_ct]], 2, TRUE),
+  stacked_wrap(aggr_class_bacia$data[[id_ct]], 3, FALSE),
+  ncol = 3
+)
+```
+
+
+```{r, fig.width = 10, fig.height = 6}
+id_ph <- aggr_class_bacia$grupo %in% "ph" %>% 
+  which()
+
+gridExtra::grid.arrange(
+  stacked_wrap(aggr_class_bacia$data[[id_ph]], 1, FALSE, c("#ffff33", "#41ab5d", "#a65628")),
+  stacked_wrap(aggr_class_bacia$data[[id_ph]], 2, TRUE, c("#ffff33", "#41ab5d", "#a65628")),
+  stacked_wrap(aggr_class_bacia$data[[id_ph]], 3, FALSE, c("#ffff33", "#41ab5d", "#a65628")),
+  ncol = 3
+)
+```
+
+## Diferença de dias na Coleta
+  
+```{r, fig.width  = 10, fig.height = 7}
+
+dbGetQuery(con, 
+  "SELECT monit, data, iqa
+  FROM ndagua WHERE
+    monit = '64230500 - IT01 - SENGÉS' OR
+    monit = '64242000 - IT02 - TAMANDUÁ' OR
+    monit = '65000900 - AI45 - PONTE ESTRADA PIRAQUARA' OR
+    monit = '65024000 - AI11 - CAMPINA DAS PEDRAS'") %>% 
+  na.omit() %>% 
+  mutate(id = stringr::word(monit ,1)) %>% 
+  group_by(id) %>% 
+  mutate(gap = round(c(0,diff(data)), 1)) %>% 
+  slice(1:7) %>%
+  mutate(count_monit = max(lubridate::year(data))) %>% 
+  
+  # nomes
+  ggplot(., 
+    aes(data, reorder(id, count_monit), group = id, colour = id, fill = id)) +
+  geom_line() + 
+  # geom_point() + 
+  geom_label(aes(label = gap)) +
+  geom_text(aes(label = gap), colour = "black") + 
+  # coord_flip() + 
+  facet_wrap(~id, nrow = 4, scales = "free") +
+  labs(x = 'Data', y = 'IQA') +
+  theme_bw() +
+  theme(
+    strip.text = element_text(colour = "white"), 
+    panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black")) + 
+  guides(fill = FALSE, colour = FALSE) +
+  scale_x_date(labels = scales::date_format("%b-%Y")) +
+  labs(y = "")
+```
+
+  
+## Regressão Suavizada
+
+```{r}
+bacia_conama <- dbGetQuery(con, 
+  "SELECT od, dbo, cf, ph, st, ct,  data, bacia
+  FROM ndagua 
+    WHERE origem = 'AguasParana'
+  ") %>% 
+  na.omit() %>% 
+  filter(bacia != "Paranapanema 1") %>% 
+  filter(dbo < 2000) %>% 
+  mutate(
+    log_cf = log(cf),
+    log_ct = log(ct),
+    log_st = log(st),
+    ) %>% 
+  tidyr::gather(parametro, medida, od, log_cf, dbo, log_st, log_ct, ph) %>% 
+  group_by(parametro) %>% 
+  tidyr::nest()
+
+fun_graf_smooth <- function(dataset, escala, variavel){
+  
+  dataset %>% 
+    ggplot(aes(x = data, y  = medida)) +
+    geom_point(colour = "gray60") +
+    facet_wrap(~bacia, scales = escala) +
+    geom_smooth(aes(colour = "Loess"), method = "loess", fill = "#fc8d59") +
+    stat_mean_line(aes(colour = "Média"), 
+      linetype = "dashed",
+      size = 0.75) +
+    scale_colour_manual(name = "",
+      labels = c("Loess", "Média"),
+      values = c("red", "#006d2c")) +
+    guides(
+      col = guide_legend(
+        override.aes = list(
+          fill = c("#fc8d59", NA),
+          linetype = c(1,2))
+      )) +
+    theme_bw() + 
+    theme(
+      legend.position = "bottom",
+      legend.key.size = unit(1.5, "line"),
+      legend.text = element_text(size = rel(1.3))
+    )+ 
+    labs(x = "Data", y = variavel)
+  # )
+}
+
+call_smooth <-  pmap(
+  .l = list(
+    bacia_conama$data,  
+    c("fixed", "fixed", "free_y", "fixed", "fixed", "fixed"),
+    bacia_conama$parametro),
+  .f = fun_graf_smooth)
+
+``` 
+
+
+
+```{r, fig.width = 9, fig.height = 6}
+walk(call_smooth[1], plot)
+```
+
+```{r, fig.width = 10, fig.height = 6}
+walk(call_smooth[2], plot)
+```
+
+
+
+```{r, fig.width = 9, fig.height = 6}
+walk(call_smooth[3], plot)
+```
+
+
+
+```{r, fig.width = 10, fig.height = 7}
+walk(call_smooth[4], plot)
+```
+
+
+```{r, fig.width = 10, fig.height = 7}
+walk(call_smooth[5], plot)
+```
+
+```{r, fig.width = 10, fig.height = 7}
+walk(call_smooth[6], plot)
+```
+
+
